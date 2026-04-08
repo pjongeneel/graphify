@@ -37,6 +37,16 @@ _SETTINGS_HOOK = {
     ],
 }
 
+_SESSION_START_HOOK = {
+    "matcher": "",
+    "hooks": [
+        {
+            "type": "command",
+            "command": "graphify scan . --quiet",
+        }
+    ],
+}
+
 _SKILL_REGISTRATION = (
     "\n# graphify\n"
     "- **graphify** (`~/.claude/skills/graphify/SKILL.md`) "
@@ -130,7 +140,7 @@ This project has a graphify knowledge graph at graphify-out/.
 Rules:
 - Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
 - If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
-- After modifying code files in this session, run `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))"` to keep the graph current
+- After modifying code files in this session, run `graphify scan .` to keep the graph current
 """
 
 _CLAUDE_MD_MARKER = "## graphify"
@@ -145,7 +155,7 @@ This project has a graphify knowledge graph at graphify-out/.
 Rules:
 - Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
 - If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
-- After modifying code files in this session, run `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))"` to keep the graph current
+- After modifying code files in this session, run `graphify scan .` to keep the graph current
 """
 
 _AGENTS_MD_MARKER = "## graphify"
@@ -201,6 +211,49 @@ def _agents_uninstall(project_dir: Path) -> None:
         print(f"AGENTS.md was empty after removal - deleted {target.resolve()}")
 
 
+def _install_session_start_hook(project_dir: Path) -> None:
+    """Add graphify SessionStart hook to .claude/settings.json."""
+    settings_path = project_dir / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if settings_path.exists():
+        try:
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            settings = {}
+    else:
+        settings = {}
+
+    hooks = settings.setdefault("hooks", {})
+    session_start = hooks.setdefault("SessionStart", [])
+
+    if any("graphify scan" in str(h) for h in session_start):
+        print(f"  .claude/settings.json  ->  SessionStart hook already registered (no change)")
+        return
+
+    session_start.append(_SESSION_START_HOOK)
+    settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    print(f"  .claude/settings.json  ->  SessionStart hook registered (AST scan on session start)")
+
+
+def _uninstall_session_start_hook(project_dir: Path) -> None:
+    """Remove graphify SessionStart hook from .claude/settings.json."""
+    settings_path = project_dir / ".claude" / "settings.json"
+    if not settings_path.exists():
+        return
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return
+    session_start = settings.get("hooks", {}).get("SessionStart", [])
+    filtered = [h for h in session_start if "graphify scan" not in str(h)]
+    if len(filtered) == len(session_start):
+        return
+    settings["hooks"]["SessionStart"] = filtered
+    settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    print(f"  .claude/settings.json  ->  SessionStart hook removed")
+
+
 def claude_install(project_dir: Path | None = None) -> None:
     """Write the graphify section to the local CLAUDE.md."""
     target = (project_dir or Path(".")) / "CLAUDE.md"
@@ -217,12 +270,14 @@ def claude_install(project_dir: Path | None = None) -> None:
     target.write_text(new_content, encoding="utf-8")
     print(f"graphify section written to {target.resolve()}")
 
-    # Also write Claude Code PreToolUse hook to .claude/settings.json
+    # Also write Claude Code hooks to .claude/settings.json
     _install_claude_hook(project_dir or Path("."))
+    _install_session_start_hook(project_dir or Path("."))
 
     print()
     print("Claude Code will now check the knowledge graph before answering")
     print("codebase questions and rebuild it after code changes.")
+    print("The graph will be rebuilt automatically on each session start (AST only, no LLM).")
 
 
 def _install_claude_hook(project_dir: Path) -> None:
@@ -297,6 +352,7 @@ def claude_uninstall(project_dir: Path | None = None) -> None:
         print(f"CLAUDE.md was empty after removal - deleted {target.resolve()}")
 
     _uninstall_claude_hook(project_dir or Path("."))
+    _uninstall_session_start_hook(project_dir or Path("."))
 
 
 def main() -> None:
@@ -314,6 +370,16 @@ def main() -> None:
         print("    --dfs                   use depth-first instead of breadth-first")
         print("    --budget N              cap output at N tokens (default 2000)")
         print("    --graph <path>          path to graph.json (default graphify-out/graph.json)")
+        print("  scan [path]             AST-only code scan - no LLM (outputs graph.json + GRAPH_REPORT.md)")
+        print("    --html                  also generate interactive HTML visualization")
+        print("    --wiki                  also generate wiki articles")
+        print("    --obsidian              also generate Obsidian vault")
+        print("    --graphml               also generate GraphML file")
+        print("    --svg                   also generate SVG visualization")
+        print("    --cypher                also generate Neo4j Cypher import")
+        print("    --output <dir>          output directory (default: <path>/graphify-out)")
+        print("    --quiet                 suppress progress output")
+        print("    --follow-symlinks       follow symbolic links during file discovery")
         print("  benchmark [graph.json]  measure token reduction vs naive full-corpus approach")
         print("  hook install            install post-commit/post-checkout git hooks (all platforms)")
         print("  hook uninstall          remove git hooks")
@@ -448,6 +514,50 @@ def main() -> None:
                 pass
         result = run_benchmark(graph_path, corpus_words=corpus_words)
         print_benchmark(result)
+    elif cmd == "scan":
+        from graphify.scan import scan as run_scan
+        scan_path = "."
+        output_dir = None
+        flags = {
+            "html": False, "wiki": False, "obsidian": False,
+            "graphml": False, "svg": False, "cypher": False,
+            "follow_symlinks": False, "quiet": False,
+        }
+        args = sys.argv[2:]
+        i = 0
+        while i < len(args):
+            if args[i] == "--html":
+                flags["html"] = True
+            elif args[i] == "--wiki":
+                flags["wiki"] = True
+            elif args[i] == "--obsidian":
+                flags["obsidian"] = True
+            elif args[i] == "--graphml":
+                flags["graphml"] = True
+            elif args[i] == "--svg":
+                flags["svg"] = True
+            elif args[i] == "--cypher":
+                flags["cypher"] = True
+            elif args[i] == "--follow-symlinks":
+                flags["follow_symlinks"] = True
+            elif args[i] == "--quiet":
+                flags["quiet"] = True
+            elif args[i] == "--output" and i + 1 < len(args):
+                output_dir = args[i + 1]
+                i += 1
+            elif args[i].startswith("--output="):
+                output_dir = args[i].split("=", 1)[1]
+            elif not args[i].startswith("-"):
+                scan_path = args[i]
+            i += 1
+        try:
+            run_scan(Path(scan_path), output_dir=Path(output_dir) if output_dir else None, **flags)
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as exc:
+            print(f"error: scan failed: {exc}", file=sys.stderr)
+            sys.exit(1)
     else:
         print(f"error: unknown command '{cmd}'", file=sys.stderr)
         print("Run 'graphify --help' for usage.", file=sys.stderr)

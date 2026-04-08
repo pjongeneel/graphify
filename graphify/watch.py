@@ -24,58 +24,14 @@ def _rebuild_code(watch_path: Path, *, follow_symlinks: bool = False) -> bool:
     Returns True on success, False on error.
     """
     try:
-        from graphify.extract import collect_files, extract
-        from graphify.build import build_from_json
-        from graphify.cluster import cluster, score_all
-        from graphify.analyze import god_nodes, surprising_connections, suggest_questions
-        from graphify.report import generate
-        from graphify.export import to_json
-
-        code_files = collect_files(watch_path, follow_symlinks=follow_symlinks)
-        code_files = [
-            f for f in code_files
-            if "graphify-out" not in f.parts
-            and "__pycache__" not in f.parts
-        ]
-
-        if not code_files:
-            print("[graphify watch] No code files found - nothing to rebuild.")
-            return False
-
-        result = extract(code_files)
-
-        detection = {
-            "files": {"code": [str(f) for f in code_files], "document": [], "paper": [], "image": []},
-            "total_files": len(code_files),
-            "total_words": 0,  # not needed during watch rebuild
-        }
-
-        G = build_from_json(result)
-        communities = cluster(G)
-        cohesion = score_all(G, communities)
-        gods = god_nodes(G)
-        surprises = surprising_connections(G, communities)
-        labels = {cid: "Community " + str(cid) for cid in communities}
-        questions = suggest_questions(G, communities, labels)
-
-        out = watch_path / "graphify-out"
-        out.mkdir(exist_ok=True)
-
-        report = generate(G, communities, cohesion, labels, gods, surprises, detection,
-                          {"input": 0, "output": 0}, str(watch_path), suggested_questions=questions)
-        (out / "GRAPH_REPORT.md").write_text(report)
-        to_json(G, communities, str(out / "graph.json"))
-
-        # clear stale needs_update flag if present
-        flag = out / "needs_update"
-        if flag.exists():
-            flag.unlink()
-
-        print(f"[graphify watch] Rebuilt: {G.number_of_nodes()} nodes, "
-              f"{G.number_of_edges()} edges, {len(communities)} communities")
-        print(f"[graphify watch] graph.json and GRAPH_REPORT.md updated in {out}")
+        from graphify.scan import scan
+        result = scan(watch_path, follow_symlinks=follow_symlinks)
+        print(f"[graphify watch] Rebuilt: {result['node_count']} nodes, "
+              f"{result['edge_count']} edges, {result['community_count']} communities")
         return True
-
+    except RuntimeError as exc:
+        print(f"[graphify watch] {exc}")
+        return False
     except Exception as exc:
         print(f"[graphify watch] Rebuild failed: {exc}")
         return False
