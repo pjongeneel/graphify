@@ -3,7 +3,10 @@
 Entry point for `graphify scan` CLI and internal callers like watch.py and hooks.
 """
 from __future__ import annotations
+import sys
 from pathlib import Path
+
+sys.setrecursionlimit(10_000)
 
 
 def scan(
@@ -70,6 +73,12 @@ def scan(
     report = generate(G, communities, cohesion, labels, gods, surprises, detection,
                       {"input": 0, "output": 0}, str(target), suggested_questions=questions)
     (out / "GRAPH_REPORT.md").write_text(report)
+
+    from graphify.django import analyze_django_project
+    from graphify.summary import generate_summary
+    django_ctx = analyze_django_project(target, code_files, G)
+    summary = generate_summary(G, gods, django_ctx=django_ctx)
+    (out / "SUMMARY.md").write_text(summary)
     to_json(G, communities, str(out / "graph.json"))
 
     # clear stale needs_update flag if present
