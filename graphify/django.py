@@ -9,7 +9,7 @@ from __future__ import annotations
 import ast
 import re
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 import networkx as nx
@@ -96,11 +96,6 @@ def _detect_app_dirs(code_files: list[Path], target: Path) -> list[str]:
 # File-role classification
 # ---------------------------------------------------------------------------
 
-_ROLE_RULES: list[tuple[str, ...]] = [
-    # (role, *match_predicates)  -- checked in order
-]
-
-
 def classify_app_files(
     app_dir: str, code_files: list[Path], target: Path
 ) -> dict[str, list[str]]:
@@ -138,10 +133,12 @@ def _classify_one(inner_path: str, filename: str) -> str:
 
     if filename == "models.py" or (len(parts) >= 2 and parts[0] == "models"):
         return "models"
-    if filename == "views.py" or (len(parts) >= 2 and parts[0] == "views"):
-        return "views"
     if filename == "urls.py":
         return "urls"
+    if (len(parts) >= 2 and parts[0] == "api") or "serializer" in filename.lower():
+        return "api"
+    if filename == "views.py" or (len(parts) >= 2 and parts[0] == "views"):
+        return "views"
     if filename == "services.py" or (len(parts) >= 2 and parts[0] == "services"):
         return "services"
     if "management" in parts and "commands" in parts:
@@ -152,8 +149,6 @@ def _classify_one(inner_path: str, filename: str) -> str:
         return "signals"
     if filename == "forms.py" or (len(parts) >= 2 and parts[0] == "forms"):
         return "forms"
-    if (len(parts) >= 2 and parts[0] == "api") or "serializer" in filename.lower():
-        return "api"
     if (
         "tests" in parts
         or "test" in parts
@@ -185,6 +180,9 @@ def extract_model_info(source_file: str, file_text: str) -> list[ModelInfo]:
         if not isinstance(node, ast.ClassDef):
             continue
 
+        if not _is_django_model_class(node):
+            continue
+
         bases = _get_base_names(node)
         fields = _get_relationship_fields(node)
 
@@ -198,6 +196,16 @@ def extract_model_info(source_file: str, file_text: str) -> list[ModelInfo]:
     return models
 
 
+def _is_django_model_class(cls: ast.ClassDef) -> bool:
+    """Return True if the class looks like a real Django model."""
+    base_names = _get_base_names(cls)
+    if any(base in {"Model", "AbstractUser"} for base in base_names):
+        return True
+    if any(base.endswith("Model") for base in base_names):
+        return True
+    return _has_django_field_assignments(cls)
+
+
 def _get_base_names(cls: ast.ClassDef) -> list[str]:
     names: list[str] = []
     for base in cls.bases:
@@ -206,6 +214,26 @@ def _get_base_names(cls: ast.ClassDef) -> list[str]:
         elif isinstance(base, ast.Attribute):
             names.append(base.attr)
     return names
+
+
+def _has_django_field_assignments(cls: ast.ClassDef) -> bool:
+    for item in cls.body:
+        value: ast.expr | None = None
+        if isinstance(item, ast.Assign):
+            value = item.value
+        elif isinstance(item, ast.AnnAssign):
+            value = item.value
+
+        if isinstance(value, ast.Call) and _looks_like_django_field_call(value):
+            return True
+    return False
+
+
+def _looks_like_django_field_call(call: ast.Call) -> bool:
+    func_name = _call_func_name(call)
+    if func_name is None:
+        return False
+    return func_name.endswith("Field") or func_name in _RELATIONSHIP_FIELDS
 
 
 def _get_relationship_fields(cls: ast.ClassDef) -> list[ModelField]:
@@ -288,7 +316,35 @@ def extract_url_patterns(source_file: str, file_text: str) -> list[URLPattern]:
     except SyntaxError:
         return []
 
+    assignments: dict[str, ast.expr] = {}
+    root_patterns: list[ast.expr] = []
+
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if not isinstance(target, ast.Name):
+                    continue
+                assignments[target.id] = node.value
+                if target.id == "urlpatterns":
+                    root_patterns.append(node.value)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            assignments[node.target.id] = node.value
+            if node.target.id == "urlpatterns" and node.value is not None:
+                root_patterns.append(node.value)
+
     patterns: list[URLPattern] = []
+    for expr in root_patterns:
+        patterns.extend(
+            _extract_url_patterns_from_expr(
+                expr=expr,
+                assignments=assignments,
+                prefix="",
+                source_file=source_file,
+            )
+        )
+
+    if patterns:
+        return patterns
 
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -306,16 +362,140 @@ def extract_url_patterns(source_file: str, file_text: str) -> list[URLPattern]:
         if not view_ref:
             continue
 
-        name = _extract_kwarg_str(node, "name")
-
         patterns.append(URLPattern(
             path=url_path,
             view_ref=view_ref,
-            name=name,
+            name=_extract_kwarg_str(node, "name"),
             source_file=source_file,
         ))
 
     return patterns
+
+
+def _extract_url_patterns_from_expr(
+    *,
+    expr: ast.expr | None,
+    assignments: dict[str, ast.expr],
+    prefix: str,
+    source_file: str,
+) -> list[URLPattern]:
+    if expr is None:
+        return []
+    if isinstance(expr, ast.Name):
+        resolved = assignments.get(expr.id)
+        if resolved is None:
+            return []
+        return _extract_url_patterns_from_expr(
+            expr=resolved,
+            assignments=assignments,
+            prefix=prefix,
+            source_file=source_file,
+        )
+    if isinstance(expr, (ast.List, ast.Tuple)):
+        patterns: list[URLPattern] = []
+        for item in expr.elts:
+            patterns.extend(
+                _extract_url_patterns_from_pattern(
+                    call=item,
+                    assignments=assignments,
+                    prefix=prefix,
+                    source_file=source_file,
+                )
+            )
+        return patterns
+    return []
+
+
+def _extract_url_patterns_from_pattern(
+    *,
+    call: ast.expr,
+    assignments: dict[str, ast.expr],
+    prefix: str,
+    source_file: str,
+) -> list[URLPattern]:
+    if not isinstance(call, ast.Call):
+        return []
+
+    func_name = _call_func_name(call)
+    if func_name not in ("path", "re_path"):
+        return []
+
+    url_path = _first_str_arg(call)
+    if url_path is None:
+        return []
+
+    full_path = _join_url_path(prefix, url_path)
+    second = call.args[1] if len(call.args) >= 2 else None
+    if second is None:
+        return []
+
+    if isinstance(second, ast.Call):
+        fn = second.func
+        if isinstance(fn, ast.Name) and fn.id == "include":
+            include_expr = second.args[0] if second.args else None
+
+            nested = _extract_url_patterns_from_expr(
+                expr=include_expr,
+                assignments=assignments,
+                prefix=full_path,
+                source_file=source_file,
+            )
+            if nested:
+                return nested
+
+            module = _resolve_include_module(second)
+            if module:
+                return [
+                    URLPattern(
+                        path=full_path,
+                        view_ref=f"include({module})",
+                        name=_extract_kwarg_str(call, "name"),
+                        source_file=source_file,
+                    )
+                ]
+            return []
+
+    view_ref = _extract_view_ref(call)
+    if not view_ref:
+        return []
+
+    return [
+        URLPattern(
+            path=full_path,
+            view_ref=view_ref,
+            name=_extract_kwarg_str(call, "name"),
+            source_file=source_file,
+        )
+    ]
+
+
+def _join_url_path(prefix: str, path: str) -> str:
+    if not prefix:
+        return path
+    if not path:
+        return prefix
+    if prefix.endswith("/"):
+        return prefix + path
+    return prefix + "/" + path
+
+
+def _resolve_include_module(call: ast.Call) -> str | None:
+    arg = call.args[0] if call.args else None
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return arg.value
+    if isinstance(arg, ast.Attribute):
+        return _dotted(arg)
+    if isinstance(arg, ast.Name):
+        return arg.id
+    if isinstance(arg, ast.Tuple) and arg.elts:
+        first = arg.elts[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            return first.value
+        if isinstance(first, ast.Attribute):
+            return _dotted(first)
+        if isinstance(first, ast.Name):
+            return first.id
+    return None
 
 
 def _first_str_arg(call: ast.Call) -> str | None:
@@ -434,6 +614,9 @@ def detect_external_packages(code_files: list[Path]) -> list[str]:
     for f in code_files:
         if f.suffix != ".py":
             continue
+        rel = PurePosixPath(f.as_posix())
+        if _should_skip_summary_file(rel):
+            continue
         try:
             text = f.read_text(errors="ignore")
             tree = ast.parse(text)
@@ -467,23 +650,8 @@ def _check_import(module_name: str, found: set[str]) -> None:
 # ---------------------------------------------------------------------------
 
 def get_project_description(target: Path) -> str | None:
-    """Try to pull a one-liner project description from pyproject.toml or README."""
-    desc = _desc_from_pyproject(target)
-    if desc:
-        return desc
+    """Return the first descriptive paragraph from the project README."""
     return _desc_from_readme(target)
-
-
-def _desc_from_pyproject(target: Path) -> str | None:
-    pyproject = target / "pyproject.toml"
-    if not pyproject.exists():
-        return None
-    try:
-        text = pyproject.read_text(errors="ignore")
-        m = re.search(r'^description\s*=\s*["\'](.+?)["\']', text, re.MULTILINE)
-        return m.group(1) if m else None
-    except Exception:
-        return None
 
 
 def _desc_from_readme(target: Path) -> str | None:
@@ -515,7 +683,7 @@ def _desc_from_readme(target: Path) -> str | None:
 
         if content:
             desc = " ".join(content)
-            return desc[:300].rstrip() + ("..." if len(desc) > 300 else "")
+            return desc
     return None
 
 
@@ -532,6 +700,18 @@ _SKIP_FILE_DIRS = {
 _SKIP_FILE_EXTENSIONS = {".js", ".jsx", ".css", ".scss", ".html", ".svg", ".min.js"}
 
 
+def _should_skip_summary_file(path: PurePosixPath) -> bool:
+    if any(part in _SKIP_FILE_DIRS for part in path.parts):
+        return True
+    if path.name in ("conftest.py", "factories.py"):
+        return True
+    if path.name.startswith("test_"):
+        return True
+    if path.suffix in _SKIP_FILE_EXTENSIONS:
+        return True
+    return False
+
+
 def high_leverage_files(G: nx.Graph, top_n: int = 10) -> list[tuple[str, int]]:
     """Return the *top_n* source files ranked by total degree of contained nodes.
 
@@ -545,12 +725,7 @@ def high_leverage_files(G: nx.Graph, top_n: int = 10) -> list[tuple[str, int]]:
         if data.get("file_type") == "rationale":
             continue
         p = PurePosixPath(src)
-        # Skip test files, static assets, tooling dirs
-        if any(part in _SKIP_FILE_DIRS for part in p.parts):
-            continue
-        if p.name in ("conftest.py", "factories.py"):
-            continue
-        if p.suffix in _SKIP_FILE_EXTENSIONS:
+        if _should_skip_summary_file(p):
             continue
         file_degree[src] += G.degree(nid)
 

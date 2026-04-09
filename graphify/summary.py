@@ -188,10 +188,12 @@ def _section_domain_model(
     graph_inherits: dict[str, list[str]] = defaultdict(list)
     for u, v, edata in G.edges(data=True):
         if edata.get("relation") == "inherits":
-            u_label = G.nodes[u].get("label", "")
-            v_label = G.nodes[v].get("label", "")
-            if u_label and v_label:
-                graph_inherits[u_label].append(v_label)
+            src_id = edata.get("_src", u)
+            tgt_id = edata.get("_tgt", v)
+            src_label = G.nodes[src_id].get("label", "")
+            tgt_label = G.nodes[tgt_id].get("label", "")
+            if src_label and tgt_label:
+                graph_inherits[src_label].append(tgt_label)
 
     for app in ctx.apps:
         if not app.models:
@@ -257,7 +259,10 @@ def _section_app_map(
             if not files:
                 continue
 
-            labels = app_node_labels(G, app.path, role_key, files)
+            if role_key == "models":
+                labels = [model.name for model in app.models]
+            else:
+                labels = app_node_labels(G, app.path, role_key, files)
             if not labels:
                 continue
 
