@@ -2420,6 +2420,26 @@ def extract(paths: list[Path]) -> dict:
     }
 
 
+def _collect_via_git(target: Path, extensions: set[str]) -> list[Path] | None:
+    """Use git ls-files to collect files, respecting .gitignore. Returns None if not a git repo."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+            cwd=target, capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            return None
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    files = []
+    for line in result.stdout.splitlines():
+        p = target / line
+        if p.suffix in extensions:
+            files.append(p)
+    return sorted(files)
+
+
 def collect_files(target: Path, *, follow_symlinks: bool = False) -> list[Path]:
     if target.is_file():
         return [target]
@@ -2430,6 +2450,10 @@ def collect_files(target: Path, *, follow_symlinks: bool = False) -> list[Path]:
         ".lua", ".toc", ".zig", ".ps1",
         ".m", ".mm",
     }
+    # Prefer git ls-files when available — respects .gitignore
+    git_files = _collect_via_git(target, _EXTENSIONS)
+    if git_files is not None:
+        return git_files
     if not follow_symlinks:
         results: list[Path] = []
         for ext in sorted(_EXTENSIONS):

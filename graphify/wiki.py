@@ -147,6 +147,8 @@ def _index_md(
     ]
 
     for cid, nodes in sorted(communities.items(), key=lambda x: -len(x[1])):
+        if not nodes:
+            continue
         label = labels.get(cid, f"Community {cid}")
         lines.append(f"- [[{label}]] — {len(nodes)} nodes")
     lines.append("")
@@ -193,6 +195,8 @@ def to_wiki(
 
     # Community articles
     for cid, nodes in communities.items():
+        if not nodes:
+            continue
         label = labels.get(cid, f"Community {cid}")
         article = _community_article(G, cid, nodes, label, labels, cohesion.get(cid))
         (out / f"{_safe_filename(label)}.md").write_text(article)

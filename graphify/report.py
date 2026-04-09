@@ -87,10 +87,14 @@ def generate(
     lines += ["", "## Communities"]
     from .analyze import _is_file_node as _ifn
     for cid, nodes in communities.items():
+        if not nodes:
+            continue
         label = community_labels.get(cid, f"Community {cid}")
         score = cohesion_scores.get(cid, 0.0)
         # Filter method/function stubs from display - they're structural noise
         real_nodes = [n for n in nodes if not _ifn(G, n)]
+        if not real_nodes:
+            continue
         display = [G.nodes[n].get("label", n) for n in real_nodes[:8]]
         suffix = f" (+{len(real_nodes)-8} more)" if len(real_nodes) > 8 else ""
         lines += [
