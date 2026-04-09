@@ -264,6 +264,11 @@ def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str) ->
     for node in data["nodes"]:
         node["community"] = node_community.get(node["id"])
     for link in data["links"]:
+        # nx.Graph is undirected so source/target order is arbitrary.
+        # Restore the original extraction direction from _src/_tgt.
+        if "_src" in link and "_tgt" in link:
+            link["source"] = link["_src"]
+            link["target"] = link["_tgt"]
         if "confidence_score" not in link:
             conf = link.get("confidence", "EXTRACTED")
             link["confidence_score"] = _CONFIDENCE_SCORE_DEFAULTS.get(conf, 1.0)

@@ -573,30 +573,34 @@ def service_call_graph(G: nx.Graph) -> dict[str, list[tuple[str, str, str]]]:
         if rel not in ("calls", "uses"):
             continue
 
-        u_data = node_data.get(u, {})
-        v_data = node_data.get(v, {})
-        u_src = u_data.get("source_file", "")
-        v_src = v_data.get("source_file", "")
+        # Use _src/_tgt for correct direction (nx.Graph is undirected)
+        src_id = edata.get("_src", u)
+        tgt_id = edata.get("_tgt", v)
+
+        src_data = node_data.get(src_id, {})
+        tgt_data = node_data.get(tgt_id, {})
+        src_file = src_data.get("source_file", "")
+        tgt_file = tgt_data.get("source_file", "")
 
         # At least one side must be in a services/ path
-        u_in_svc = "/services/" in u_src or u_src.endswith("/services.py")
-        v_in_svc = "/services/" in v_src or v_src.endswith("/services.py")
-        if not (u_in_svc or v_in_svc):
+        src_in_svc = "/services/" in src_file or src_file.endswith("/services.py")
+        tgt_in_svc = "/services/" in tgt_file or tgt_file.endswith("/services.py")
+        if not (src_in_svc or tgt_in_svc):
             continue
 
         # Skip test nodes
-        u_label = u_data.get("label", "")
-        v_label = v_data.get("label", "")
-        if u_label.startswith("Test") or v_label.startswith("Test"):
+        src_label = src_data.get("label", "")
+        tgt_label = tgt_data.get("label", "")
+        if src_label.startswith("Test") or tgt_label.startswith("Test"):
             continue
-        if u_label.startswith("test_") or v_label.startswith("test_"):
+        if src_label.startswith("test_") or tgt_label.startswith("test_"):
             continue
 
         # Determine which service dir this belongs to
-        svc_src = u_src if u_in_svc else v_src
-        svc_dir = str(PurePosixPath(svc_src).parent)
+        svc_file = src_file if src_in_svc else tgt_file
+        svc_dir = str(PurePosixPath(svc_file).parent)
 
-        calls[svc_dir].append((u_label, v_label, rel))
+        calls[svc_dir].append((src_label, tgt_label, rel))
 
     return dict(calls)
 
